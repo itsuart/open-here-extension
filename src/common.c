@@ -1,0 +1,7 @@
+static const GUID SERVER_GUID = 
+{ 0xa7a5ef16, 0x3df8, 0x4f47, { 0x83, 0x57, 0xdb, 0x3b, 0x8b, 0x92, 0xd8, 0x19 } };
+
+#define SERVER_GUID_TEXT  L"{A7A5EF16-3DF8-4F47-8357-DB3B8B92D819}"
+#define MAX_UNICODE_PATH_LENGTH 32767
+
+
