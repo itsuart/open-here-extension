@@ -23,6 +23,7 @@ typedef struct tag_FSEntryIndexEntry { //TODO: name sucks
 
 typedef struct tag_FSEntriesContainer {
     HANDLE hHeap;
+    u16 rootDirectory[MAX_PATH + 1];
     uint nEntries;
     uint capacity;
     u16* memory;
@@ -32,7 +33,7 @@ typedef struct tag_FSEntriesContainer {
 } FSEntriesContainer;
 
 
-static bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap){
+static bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap, u16* rootDirectory){
     const uint initialMaxChars = 1024;
     u16* memory = (u16*)HeapAlloc(hHeap, HEAP_ZERO_MEMORY, initialMaxChars * sizeof(u16));
     if (memory == NULL){
@@ -49,6 +50,9 @@ static bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap
 
     pContainer->hHeap = hHeap;
 
+    SecureZeroMemory(pContainer->rootDirectory, sizeof(pContainer->rootDirectory));
+    lstrcpyW(pContainer->rootDirectory, rootDirectory);
+
     pContainer->nEntries = 0;
     pContainer->capacity = initialCapacity;
     pContainer->indexes = (FSEntryIndexEntry*)indexesMemory;
@@ -58,6 +62,14 @@ static bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap
     pContainer->maxChars = initialMaxChars;
 
     return true;
+}
+
+static void FSEntriesContainer_clear(FSEntriesContainer* pContainer){
+    SecureZeroMemory(pContainer->indexes, pContainer->nEntries * sizeof(FSEntryIndexEntry));
+    SecureZeroMemory(pContainer->memory, pContainer->maxChars * sizeof(u16));
+
+    pContainer->nEntries = 0;
+    pContainer->nextFreeOffset = 0;
 }
 
 static bool FSEntriesContainer_add(FSEntriesContainer* pContainer, u16* fullPath, bool isDirectory){
@@ -156,7 +168,6 @@ static bool is_two_dots(u16* string){
 }
 
 static u16 rootDirectoryPathBuffer[MAX_UNICODE_PATH_LENGTH + 1]; //TODO: to actually be able to use long unicode paths, you have to prepend \\?\ or do windows 10 anniversary edition tricks
-static u16 itemFullPathBuffer[MAX_UNICODE_PATH_LENGTH + 1]; //TODO: the same
 static u16 searchPathBuffer[MAX_UNICODE_PATH_LENGTH + 1];
 static FSEntriesContainer container;
 void entry_point(){
@@ -200,7 +211,7 @@ void entry_point(){
                 ODS(L"Filed to create heap for FS entries container");
                 goto exit;
             }
-            if (! FSEntriesContainer_init(&container, hContainerHeap)){
+            if (! FSEntriesContainer_init(&container, hContainerHeap, rootDirectoryPathBuffer)){
                 ODS(L"Failed to initialize FS Entries container");
                 goto exit;
             }
@@ -231,14 +242,8 @@ void entry_point(){
                     if (is_two_dots(findData.cFileName)){
                         continue;
                     }
-                    //TODO: this is not efficient
-                    SecureZeroMemory(itemFullPathBuffer, sizeof(itemFullPathBuffer));
-                    lstrcpyW(itemFullPathBuffer, rootDirectoryPathBuffer);
-                    PathAppendW(itemFullPathBuffer, findData.cFileName);
-                    ODS(itemFullPathBuffer);
-
                     
-                    if (! FSEntriesContainer_add(&container, itemFullPathBuffer, isDirectory)){
+                    if (! FSEntriesContainer_add(&container, findData.cFileName, isDirectory)){
                         ODS(L"Failed to add item to the container");
                         goto exit;
                     }

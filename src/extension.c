@@ -14,11 +14,160 @@ typedef intmax_t sint;
 typedef USHORT u16;
 typedef unsigned char u8;
 
-//#define ODS(x) OutputDebugStringW(x)
-#define ODS(x) (void)0
+#define ODS(x) OutputDebugStringW(x)
+//#define ODS(x) (void)0
 
 /* GLOBALS */
 #include "common.c"
+
+
+typedef struct tag_FSEntryIndexEntry { //TODO: name sucks
+    uint offset; //in bytes to first char of a string
+    bool isDirectory; //TODO: not perfect memory usage (63 bits wasted)
+} FSEntryIndexEntry;
+
+typedef struct tag_FSEntriesContainer {
+    HANDLE hHeap;
+    u16 rootDirectory[MAX_PATH + 1];
+    uint nEntries;
+    uint capacity;
+    u16* memory;
+    uint nextFreeOffset;
+    uint maxChars;
+    FSEntryIndexEntry* indexes;
+} FSEntriesContainer;
+
+
+static bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap, u16* rootDirectory){
+    const uint initialMaxChars = 1024;
+    u16* memory = (u16*)HeapAlloc(hHeap, HEAP_ZERO_MEMORY, initialMaxChars * sizeof(u16));
+    if (memory == NULL){
+        ODS(L"Failed to allocate initial memory for the FS Entries");
+        return false;
+    };
+
+    const uint initialCapacity = 20;
+    void* indexesMemory = HeapAlloc(hHeap, HEAP_ZERO_MEMORY, initialCapacity * sizeof(FSEntryIndexEntry));
+    if (indexesMemory == NULL){
+        ODS(L"Failed to allocate initial memory for FS Entries index");
+        return false;
+    }
+
+    pContainer->hHeap = hHeap;
+
+    SecureZeroMemory(pContainer->rootDirectory, sizeof(pContainer->rootDirectory));
+    lstrcpyW(pContainer->rootDirectory, rootDirectory);
+
+    pContainer->nEntries = 0;
+    pContainer->capacity = initialCapacity;
+    pContainer->indexes = (FSEntryIndexEntry*)indexesMemory;
+    
+    pContainer->memory = memory;
+    pContainer->nextFreeOffset = 0;
+    pContainer->maxChars = initialMaxChars;
+
+    return true;
+}
+
+static void FSEntriesContainer_clear(FSEntriesContainer* pContainer){
+    SecureZeroMemory(pContainer->indexes, pContainer->nEntries * sizeof(FSEntryIndexEntry));
+    SecureZeroMemory(pContainer->memory, pContainer->maxChars * sizeof(u16));
+
+    pContainer->nEntries = 0;
+    pContainer->nextFreeOffset = 0;
+}
+
+static bool FSEntriesContainer_add(FSEntriesContainer* pContainer, u16* fullPath, bool isDirectory){
+    if (pContainer->nEntries == pContainer->capacity){
+        const uint newCapacity = pContainer->capacity * 2; //not sure it's wise in our case. maybe +10 or something would be better. TODO: read on max number of fs enries in directory in NTFS
+        //NOTE: no need to check for capacity to overflow. We will run out of memory long before that could happen
+        FSEntryIndexEntry* newIndexesMemory = HeapReAlloc(pContainer->hHeap, HEAP_ZERO_MEMORY, pContainer->indexes, newCapacity * sizeof(FSEntryIndexEntry));
+        if (newIndexesMemory == NULL){
+            ODS(L"Failed to reallocate memory for indexes");
+            return false;
+        }
+
+        pContainer->indexes = newIndexesMemory;
+        pContainer->capacity = newCapacity;
+    }
+
+   
+    FSEntryIndexEntry newEntry = {.isDirectory = isDirectory, .offset = pContainer->nextFreeOffset};
+    pContainer->indexes[pContainer->nEntries] = newEntry;
+    pContainer->nEntries += 1;
+ 
+    uint fullPathOffset = 0;
+    bool keepLooping = true;
+    while (keepLooping){
+        if (pContainer->maxChars == pContainer->nextFreeOffset){
+            //we exhausted currently allocated memory for the strings, reallocate
+            const uint newMaxChars = pContainer->maxChars * 2; //again it might be overkill
+            u16* newMemory = (u16*)HeapReAlloc(pContainer->hHeap, HEAP_ZERO_MEMORY, pContainer->memory, newMaxChars * sizeof(u16));
+            if (newMemory == NULL){
+                ODS(L"Failed to realloc memory for strings");
+                pContainer->nEntries -= 1;
+                return false;
+            }
+
+            pContainer->maxChars = newMaxChars;
+            pContainer->memory = newMemory;
+        }
+
+        const u16 currentPathChar = fullPath[fullPathOffset];
+        pContainer->memory[pContainer->nextFreeOffset] = currentPathChar;
+
+        pContainer->nextFreeOffset += 1;
+        fullPathOffset += 1;
+
+        if (currentPathChar == 0){
+            keepLooping = false;
+        }
+    }
+
+    if (isDirectory){
+        //collect all the directories at the beginning
+        if (pContainer->nEntries == 1){
+            //it's very first entry, no need to reshuffle
+        } else {
+            if (pContainer->indexes[pContainer->nEntries - 2].isDirectory){
+                //if previous entry is also a directory - do nothing
+            } else {
+                uint indexToSwap = 0;
+                for (sint i = pContainer->nEntries - 2; i >= 0; i-= 1){
+                    if (pContainer->indexes[i].isDirectory){
+                        indexToSwap = i + 1; //swap with next non-directory entry
+                        break;
+                    }
+                }
+
+                FSEntryIndexEntry oldEntry = pContainer->indexes[indexToSwap];
+                pContainer->indexes[indexToSwap] = pContainer->indexes[pContainer->nEntries - 1];
+                pContainer->indexes[pContainer->nEntries - 1] = oldEntry;
+            }
+        }
+    }
+
+    return true;
+}
+
+typedef bool FSEntriesWalker(const u16* name, bool isDirectory, HMENU contentMenu, UINT* pNextCommandId);
+
+static void FSEntriesContainer_walk(FSEntriesContainer* pContainer, FSEntriesWalker* callback, HMENU contentMenu, UINT* pNextCommandId){
+    for (uint i = 0; i < pContainer->nEntries; i+= 1){
+        const FSEntryIndexEntry currentIndexEntry = pContainer->indexes[i];
+        const bool keepWalking = callback(pContainer->memory + currentIndexEntry.offset, currentIndexEntry.isDirectory, contentMenu, pNextCommandId);
+        if (! keepWalking){
+            break;
+        }
+    }
+}
+
+static bool fs_entries_walker(const u16* name, bool isDirectory, HMENU contentMenu, UINT* pNextCommandId){
+    InsertMenu(contentMenu, -1, MF_BYPOSITION | MF_STRING, *pNextCommandId, name);
+    *pNextCommandId = *pNextCommandId + 1;
+    return true;
+}
+
 
 /* FORWARD DECLARATION EVERYTHING */
 struct tag_IMyObj;
@@ -42,114 +191,37 @@ typedef struct tag_IMyObj{
     IUnknownVtbl* lpVtbl;
     MyIContextMenuImpl contextMenuImpl;
     MyIShellExtInitImpl shellExtInitImpl;
-    uint nItems;
-    u16* itemNames;
+    FSEntriesContainer container;
+    u16 workingDirectory[MAX_PATH + 1];
+    u16 searchBuffer[MAX_PATH + 1];
+    HMENU hMenu;
     long int refsCount;
 } IMyObj;
-
-static void cleanup_names_storage(IMyObj* pBase){
-    if (pBase->itemNames != NULL){
-        GlobalFree(pBase->itemNames);
-    }
-    pBase->itemNames = NULL;
-    pBase->nItems = 0;
-}
 
 
 
 /******************************* IContextMenu ***************************/
-static const u16* COPY_VERB = SERVER_GUID_TEXT L".COPY";
-static const u16* MOVE_VERB = SERVER_GUID_TEXT L".MOVE";
-
-#define COPY_TO_MENU_OFFSET 1
-#define MOVE_TO_MENU_OFFSET 2
 
 HRESULT STDMETHODCALLTYPE myIContextMenuImpl_GetCommandString(MyIContextMenuImpl* pImpl, 
                                                               UINT_PTR idCmd, UINT uFlags, UINT* pwReserved,LPSTR pszName,UINT cchMax){
-    if (uFlags == GCS_VERBW){
-        switch (idCmd){
-            case COPY_TO_MENU_OFFSET:{
-                lstrcpyW((u16*)pszName, COPY_VERB);
-                ODS(L"GetCommandString SUCCESS (copy verb)");
-                return S_OK;
-            } break;
-
-            case MOVE_TO_MENU_OFFSET:{
-                lstrcpyW((u16*)pszName, MOVE_VERB);
-                ODS(L"GetCommandString SUCCESS (move verb)");
-                return S_OK;
-            } break;
-
-        }
-    } else if (uFlags == GCS_VALIDATEW){
-        if (idCmd == COPY_TO_MENU_OFFSET || idCmd == MOVE_TO_MENU_OFFSET){
-            ODS(L"GetCommandString SUCCESS (validate cmd)");
-            return S_OK;
-        } else {
-            ODS(L"GetCommandString UNKNOWN CMD VALIDATION");
-            return S_FALSE;
-        }
+    if ( (uFlags == GCS_VERBW) || (uFlags == GCS_VALIDATEW)){
+        ODS(L"GetCommandString S_OK");
+        return S_OK;
+    } else{
+        ODS(L"GetCommandString S_FALSE");        
+        return S_FALSE;
     }
-    ODS(L"GetCommandString FAILED");
+
     return E_INVALIDARG;
-}
-
-//returns number of digits in the number
-static uint u64toW(uint number, u16 stringBuffer[20]){
-    const static u16 DIGITS[10] = L"0123456789";
-    if (number == 0){ //special case
-        stringBuffer[0] = L'0';
-        return 1;
-    }
-
-    //biggest 64 bit unsigned number is 18,446,744,073,709,551,615 that is 20 digits, so
-    uint divisor = 10;
-    int power = 0;
-    u8 reminders[20] = {0};
-
-    for (; power < 20; power += 1){
-        char reminder = number % divisor;
-
-        reminders[power] = reminder;
-        number = number / divisor;
-
-        if (number == 0){
-            break;
-        }
-    }
-
-    //put 'em digits in correct order
-    for (int i = power; i >= 0; i -= 1){
-        stringBuffer[power - i] = DIGITS[reminders[i]];
-    }
-
-    return power;
-}
-
-static void mk_label (u16* prefix, uint number, u16* buffer){
-    uint index = 0;
-    while (prefix[index] != 0){
-        buffer[index] = prefix[index];
-        index += 1;
-    }
-    uint nDigits = u64toW(number, buffer + index);
-    index += nDigits;
-
-    lstrcpyW(buffer + index + 1, number > 1 ? L" items to..." : L" item to...");
 }
 
 
 //I really hate person that causes me "undefined reference to `___chkstk_ms'" errors. And extra calls to clear the memory.
-static u16 targetDir[MAX_UNICODE_PATH_LENGTH + 2]; //extra 1 for trailing zero
+
 HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* pImpl, LPCMINVOKECOMMANDINFO pCommandInfo){
     IMyObj* pBase = pImpl->pBase;
     
     ODS(L"FOO");
-
-    if (pBase->nItems == 0){
-        return S_OK; //instantly copy or move nothing!
-    }
-    ODS(L"BAR");
 
     void* pVerb = pCommandInfo->lpVerb;
 
@@ -158,81 +230,25 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* p
         return E_INVALIDARG;
     }
 
+    ODS(L"BAR");
+    uint itemIndex = (WORD)pVerb;
+    const FSEntryIndexEntry currentIndexEntry = pBase->container.indexes[itemIndex];
+    const u16* itemName = pBase->container.memory + currentIndexEntry.offset;
+
+    u16 fullItemPath[MAX_PATH];
+    SecureZeroMemory(fullItemPath, sizeof(fullItemPath));
+    lstrcpyW(fullItemPath, pBase->container.rootDirectory);
+    PathAppendW(fullItemPath, itemName);
+    ODS(fullItemPath);
+    ShellExecuteW(NULL, NULL, fullItemPath, NULL, pBase->workingDirectory, SW_SHOWDEFAULT);
+
     ODS(L"BAZ");
-
-    u16 title[(sizeof(L"COPY ")/sizeof(L' ')) + 20 + (sizeof(L" items to...")/sizeof(L' ')) + 1];
-    SecureZeroMemory(&title[0], sizeof(title));    
-    uint fileOp;
-
-    if ((void*)pVerb == (void*)MAKEINTRESOURCE(COPY_TO_MENU_OFFSET)){
-        mk_label(L"COPY ", pBase->nItems, &title[0]);
-        fileOp = FO_COPY;
-    } else if ((void*)pVerb == (void*)MAKEINTRESOURCE(MOVE_TO_MENU_OFFSET)){
-        mk_label(L"MOVE ", pBase->nItems, &title[0]);
-        fileOp = FO_MOVE;
-    } else {
-        ODS(L"Neither COPY nor MOVE offset");
-        cleanup_names_storage(pBase);
-        return E_FAIL;
-    }
-
-    ODS(L"BAZ+");
-    //I want my monads in C!
-    HRESULT hr = S_OK; 
-    // Create a new common open file dialog.
-    IFileOpenDialog *pfd = NULL;
-    hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void**)&pfd);
-    if (SUCCEEDED(hr)){
-        ODS(L"BAZ++");
-        // Set the dialog as a folder picker.
-        DWORD dwOptions;
-        hr = pfd->lpVtbl->GetOptions(pfd, &dwOptions);
-        if (SUCCEEDED(hr)){
-            hr = pfd->lpVtbl->SetOptions(pfd, dwOptions | FOS_PICKFOLDERS);
-
-            // Set the title of the dialog.
-            if (SUCCEEDED(hr)){
-                hr = pfd->lpVtbl->SetTitle(pfd, &title[0]);
-
-                // Show the open file dialog.
-                if (SUCCEEDED(hr)){
-                    hr = pfd->lpVtbl->Show(pfd, pCommandInfo->hwnd);
-                    if (SUCCEEDED(hr)){
-                        // Get the selection from the user.
-                        IShellItem *psiResult = NULL;
-                        hr = pfd->lpVtbl->GetResult(pfd, &psiResult);
-                        if (SUCCEEDED(hr)){
-                            u16* pszPath = NULL;
-                            hr = psiResult->lpVtbl->GetDisplayName(psiResult, SIGDN_FILESYSPATH, &pszPath);
-                            if (SUCCEEDED(hr)){
-                                SecureZeroMemory(targetDir, sizeof(targetDir));
-                                lstrcpyW(&targetDir[0], pszPath);
-                                CoTaskMemFree(pszPath);
-
-                                SHFILEOPSTRUCT shFileOp = {
-                                    .hwnd = pCommandInfo->hwnd,
-                                    .wFunc = fileOp,
-                                    .pFrom = pBase->itemNames,
-                                    .pTo = &targetDir[0],
-                                    .fFlags = FOF_ALLOWUNDO,
-                                    .fAnyOperationsAborted = false,
-                                    .hNameMappings = NULL,
-                                    .lpszProgressTitle = L"ERROR!"
-                                };
-
-                                SHFileOperation(&shFileOp);                        
-                            }
-                            psiResult->lpVtbl->Release(psiResult);
-                        }
-                    }
-                }
-            }
-        }
-        pfd->lpVtbl->Release(pfd);        
-    }
-
-    cleanup_names_storage(pBase);
     return S_OK;
+}
+
+
+static bool is_two_dots(u16* string){
+    return string[0] == L'.' && string[1] == L'.' && string[2] == 0;
 }
 
 
@@ -240,6 +256,16 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl
                                                            HMENU hmenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags){
     IMyObj* pBase = pImpl->pBase;
     
+    //if we failed to acquire worknig directory...
+    if (pBase->workingDirectory[0] == 0){
+        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+    }
+
+    //same with root directory
+    if (pBase->container.rootDirectory[0] == 0){
+        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+    }
+
     if (CMF_DEFAULTONLY == (CMF_DEFAULTONLY & uFlags)
         || CMF_VERBSONLY == (CMF_VERBSONLY & uFlags)
         || CMF_NOVERBS == (CMF_NOVERBS & uFlags)){
@@ -247,21 +273,87 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
     }
 
-    //in highly unlikely case where is no room left in the menu:
-    if (idCmdFirst + 2 > idCmdLast){
-        //we don't add any menu enries of ours
-        cleanup_names_storage(pBase);
+    if (pBase->hMenu != NULL){
+        DestroyMenu(pBase->hMenu);
+        pBase->hMenu = NULL;
+    }
+
+    //walk the FS and collect entries
+    
+    WIN32_FIND_DATAW findData;
+    HANDLE searchHandle = FindFirstFileExW(pBase->searchBuffer, FindExInfoBasic, &findData, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
+    if (INVALID_HANDLE_VALUE == searchHandle){
+        if (ERROR_FILE_NOT_FOUND == GetLastError()){
+            ODS(L"OpenHereContent is empty");
+            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+        } else {
+            ODS(L"FindFirstFileW failed");
+            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+        }
+    }
+
+    bool keepSearching = true;
+    bool hasError = false;
+    while (keepSearching){
+        if (FindNextFileW(searchHandle, &findData)){
+            //ignore directory junctions for now: care required to handle those without "endless" recursion
+            const DWORD attributes = findData.dwFileAttributes;
+            const bool isDirectory = ((attributes & FILE_ATTRIBUTE_DIRECTORY) == FILE_ATTRIBUTE_DIRECTORY);
+            const bool isReparsePoint = ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == FILE_ATTRIBUTE_REPARSE_POINT);
+            if ( isDirectory && isReparsePoint){
+                continue;
+            }
+            if (is_two_dots(findData.cFileName)){
+                continue;
+            }
+                    
+            if (! FSEntriesContainer_add(&pBase->container, findData.cFileName, isDirectory)){
+                ODS(L"Failed to add item to the container");
+                FSEntriesContainer_clear(&pBase->container);
+                return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+            }
+        } else {
+            //what went wrong?
+            if (ERROR_NO_MORE_FILES == GetLastError()){
+                //that's ok
+                ODS(L"Search space exhausted");
+                keepSearching = false;
+            } else {
+                ODS(L"FindNextFileW failed");
+                hasError = true;
+                keepSearching = false;
+            }
+        }
+    }
+
+
+    if (! FindClose(searchHandle)){
+        ODS(L"FindClose failed");
+    }
+
+    HMENU contentMenu = CreateMenu();
+    if (contentMenu == NULL){
+        ODS(L"CreateMenu failed");
+        FSEntriesContainer_clear(&pBase->container);
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
     }
 
+    UINT nextFreeCommandId = idCmdFirst;
+
+    ODS(L"Walking...");
+    FSEntriesContainer_walk(&pBase->container, &fs_entries_walker, contentMenu, &nextFreeCommandId);
+    ODS(L"Walking is done");
+
+    pBase->hMenu = contentMenu;
+
+
     //insert our menu items: separator, copy and move in that order.
-    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_SEPARATOR, idCmdFirst + 0, NULL);
-    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_STRING, idCmdFirst + COPY_TO_MENU_OFFSET, L"Copy To...");
-    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_STRING, idCmdFirst + MOVE_TO_MENU_OFFSET, L"Move To...");
+    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_SEPARATOR, nextFreeCommandId, NULL);
+    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_POPUP | MF_STRING, contentMenu, L"Open Here");
 
     ODS(L"QueryContextMenu");
 
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, MOVE_TO_MENU_OFFSET + 1); //shouldn't this be +idCmdFirst?
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, nextFreeCommandId + 1);
 }
 
 
@@ -328,39 +420,11 @@ HRESULT STDMETHODCALLTYPE myIShellExtInit_QueryInterface(MyIShellExtInitImpl* pI
 }
 
 HRESULT STDMETHODCALLTYPE myIShellExtInit_Initialize(MyIShellExtInitImpl* pImpl, LPCITEMIDLIST pIDFolder, IDataObject* pDataObj, HKEY hRegKey){
-    FORMATETC   fe = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    STGMEDIUM   medium;
-
-    if (pImpl->pBase->itemNames != NULL){
-        GlobalFree(pImpl->pBase->itemNames);
-        pImpl->pBase->itemNames = NULL;
-        pImpl->pBase->nItems = 0;
-    }
-
-    if (SUCCEEDED(pDataObj->lpVtbl->GetData(pDataObj, &fe, &medium))){
-        // Get the count of files dropped.
-        uint uCount = DragQueryFile((HDROP)medium.hGlobal, (UINT)-1, NULL, 0);
-        if (uCount > 0){
-            u16* allNamesBuffer = GlobalAlloc(GPTR, (uCount * (MAX_UNICODE_PATH_LENGTH + 1) + 1) * sizeof(u16));
-            if (allNamesBuffer == NULL){
-                ReleaseStgMedium(&medium);
-                return E_OUTOFMEMORY;
-            }
-
-            //copy file items to the buffer
-            u16* currentName = allNamesBuffer;
-            for (uint i = 0; i < uCount; i += 1){
-                uint nCharsCopied = DragQueryFileW((HDROP)medium.hGlobal, i, currentName, MAX_UNICODE_PATH_LENGTH);
-                if (nCharsCopied){
-                    currentName += (nCharsCopied + 1);
-                } else {/*copying fucked up */}
-            }
-            pImpl->pBase->nItems = uCount;
-            pImpl->pBase->itemNames = allNamesBuffer;
-        }
-
-        ReleaseStgMedium(&medium);
-    }
+    SecureZeroMemory(pImpl->pBase->workingDirectory, sizeof(pImpl->pBase->workingDirectory));
+    if (! SHGetPathFromIDListW(pIDFolder, pImpl->pBase->workingDirectory)){
+        ODS(L"Failed to get path to working directory");
+        return E_FAIL;
+    };
 
     ODS(L"Initialize success");
 
@@ -393,10 +457,13 @@ ULONG STDMETHODCALLTYPE myObj_Release(IMyObj* pMyObj){
     long int nRefs = pMyObj->refsCount;
 
     if (nRefs == 0){
-        if (pMyObj->itemNames != NULL){
-            GlobalFree(pMyObj->itemNames);
-            pMyObj->itemNames = NULL;
-            pMyObj->nItems = 0;
+        if (pMyObj->container.hHeap != NULL){
+            HeapDestroy(pMyObj->container.hHeap);
+            pMyObj->container.hHeap = NULL;
+        }
+        if (pMyObj->hMenu != NULL){
+            DestroyMenu(pMyObj->hMenu);
+            pMyObj->hMenu = NULL;
         }
         GlobalFree(pMyObj);
     }
@@ -464,7 +531,45 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
        if (pMyObj == NULL){
            return E_OUTOFMEMORY;
        }
-   
+
+       HANDLE hHeap = HeapCreate(0, sizeof(FSEntriesContainer), 0);
+       if (hHeap == NULL){
+           ODS(L"Failed to create heap");
+           return E_OUTOFMEMORY;
+       }
+
+       //Get path to "my documents"
+       u16* folderPath = NULL;
+       GUID documentsFolderId = {0xFDD39AD0, 0x238F, 0x46AF, {0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7}};
+       HRESULT ret = SHGetKnownFolderPath(&documentsFolderId, KF_FLAG_DEFAULT, NULL, &folderPath);
+       if (S_OK == ret){
+           ODS(folderPath);
+
+           u16 tmpBuffer[MAX_PATH + 1];
+           SecureZeroMemory(tmpBuffer, sizeof(tmpBuffer));
+           lstrcpyW(tmpBuffer, folderPath);
+           PathAppendW(tmpBuffer, L"OpenHereContent");
+           CoTaskMemFree(folderPath);
+           folderPath = NULL;
+
+           if (! FSEntriesContainer_init(&pMyObj->container, hHeap, tmpBuffer)){
+               ODS(L"Failed to create entries container");
+               return E_OUTOFMEMORY;
+           }
+
+           SecureZeroMemory(pMyObj->searchBuffer, sizeof(pMyObj->searchBuffer));
+           lstrcpyW(pMyObj->searchBuffer, tmpBuffer);
+           //this is stupid, but hey such a life of a programmer
+           if (! PathAppendW(pMyObj->searchBuffer, L"\\*")){
+               ODS(L"Appending * failed");
+               return E_OUTOFMEMORY;
+           }
+
+       } else {
+           ODS(L"Failed to resolve My Documents path");
+           return E_OUTOFMEMORY;
+       }
+
        pMyObj->lpVtbl = &IMyObjVtbl;
 
        pMyObj->contextMenuImpl.lpVtbl = &IMyIContextMenuVtbl;

@@ -39,7 +39,7 @@ static uint remove_last_part_from_path(u16* full_path, uint full_path_length){
     }
 }
 
-#define PROGNAME L"Copy-Move Shell Extension In/Unstaller"
+#define PROGNAME L"Open Here Shell Extension In/Unstaller"
 
 static const u16 extension_name[] = L"extension.dll\0";
 
@@ -60,7 +60,7 @@ static void warn(u16* message){
 }
 
 static bool register_com_server(u16* server_path, uint server_path_length){
-    static u16 description[] = L"Windows Explorer context menu extension to copy, move and duplicate files and directories\0";
+    static u16 description[] = L"Windows Explorer context menu extension to 'open here' stuff\0";
 
     HKEY clsidKey;
     LONG errorCode = RegCreateKeyExW(
@@ -122,7 +122,7 @@ static bool register_shell_extension(){
     HKEY key;
     LONG errorCode = RegCreateKeyExW(
          HKEY_CLASSES_ROOT,
-         L"AllFileSystemObjects\\ShellEx\\ContextMenuHandlers\\" SERVER_GUID_TEXT,
+         L"Directory\\Background\\ShellEx\\ContextMenuHandlers\\" SERVER_GUID_TEXT,
          0, NULL,
          REG_OPTION_NON_VOLATILE,
          KEY_ALL_ACCESS,
@@ -141,7 +141,7 @@ static bool register_shell_extension(){
 static bool unregister_shell_extension(){
     long errorCode = RegDeleteTreeW(
            HKEY_CLASSES_ROOT,
-           L"AllFileSystemObjects\\ShellEx\\ContextMenuHandlers\\" SERVER_GUID_TEXT);
+           L"Directory\\Background\\ShellEx\\ContextMenuHandlers\\" SERVER_GUID_TEXT);
     if (errorCode != ERROR_SUCCESS){
         display_error(errorCode);
         return false;
