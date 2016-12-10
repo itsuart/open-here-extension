@@ -1,8 +1,9 @@
 #pragma once
 #include "globals.h"
+#include "WideStringContainer.h"
 
 typedef struct tag_WorkQueueEntry {
-    u16 fullPath[MAX_PATH + 1];
+    WideStringContainerIndex fullPathIndex;
     sint parentIndex;
     uint indexInParent;
 } WorkQueueEntry;

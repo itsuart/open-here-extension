@@ -3,7 +3,7 @@ LIBS = -L$(LIBRARY_PATH) -lkernel32 -lshell32 -lole32 -lShlwapi
 LINK = ld -s --subsystem windows --kill-at --no-seh
 OBJDIR = obj
 BINDIR = bin
-COMMON_OBJ = $(OBJDIR)/FSEntriesContainer.o $(OBJDIR)/DirectoriesContainer.o $(OBJDIR)/WorkQueue.o
+COMMON_OBJ = $(OBJDIR)/WideStringContainer.o $(OBJDIR)/FSEntriesContainer.o $(OBJDIR)/DirectoriesContainer.o $(OBJDIR)/WorkQueue.o
 
 
 clear_all_objs:	
@@ -11,9 +11,13 @@ clear_all_objs:
 
 mem.o:
 	@rm -f $(OBJDIR)/mem.o > NUL
-	$(CC) src/mem.c -o obj/mem.o
+	$(CC) -Wno-pointer-to-int-cast src/mem.c -o obj/mem.o
 
-FSEntriesContainer.o:
+WideStringContainer.o:
+	@rm -f $(OBJDIR)/WideStringContiner.o > NUL
+	$(CC) src/WideStringContainer.c -o $(OBJDIR)/WideStringContainer.o
+
+FSEntriesContainer.o: WideStringContainer.o
 	@rm -f $(OBJDIR)/FSEntriesContainer.o > NUL
 	$(CC) src/FSEntriesContainer.c -o obj/FSEntriesContainer.o
 

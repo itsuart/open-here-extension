@@ -1,30 +1,28 @@
 #pragma once
 #include "globals.h"
+#include "WideStringContainer.h"
 
-typedef struct tag_FSEntryIndexEntry { //TODO: name sucks
-    uint offset; //in characters (u16) to first char of a string
+typedef struct tag_FSEntry {
+    WideStringContainerIndex nameIndex;
     bool isDirectory; //TODO: not perfect memory usage (63 bits wasted)
-} FSEntryIndexEntry;
+} FSEntry;
 
 typedef struct tag_FSEntriesContainer {
     HANDLE hHeap;
-    u16 rootDirectory[MAX_PATH + 1];
+    WideStringContainerIndex nameIndex;
     uint nEntries;
     uint nDirectories;
     uint capacity;
-    u16* memory;
-    uint nextFreeOffset;
-    uint maxChars;
-    FSEntryIndexEntry* indexes;
+    FSEntry* entries;
     uint indexInParent;
     sint parentIndex;
 } FSEntriesContainer;
 
-bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap, u16* rootDirectory);
+bool FSEntriesContainer_init(FSEntriesContainer* pContainer, HANDLE hHeap, WideStringContainerIndex rootDirectory);
 
 void FSEntriesContainer_clear(FSEntriesContainer* pContainer);
 
 void FSEntriesContainer_term(FSEntriesContainer* pContainer);
 
-bool FSEntriesContainer_add(FSEntriesContainer* pContainer, u16* fullPath, bool isDirectory);
+bool FSEntriesContainer_add(FSEntriesContainer* pContainer, FSEntry entry);
 

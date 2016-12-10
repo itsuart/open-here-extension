@@ -8,19 +8,22 @@
 #include "FSEntriesContainer.h"
 #include "DirectoriesContainer.h"
 #include "WorkQueue.h"
-
-#define MAX_UNICODE_PATH_LENGTH 32767
-
+#include "WideStringContainer.h"
 
 
 static bool is_two_dots(u16* string){
     return string[0] == L'.' && string[1] == L'.' && string[2] == 0;
 }
 
-static bool process_directory(u16* directoryPath, FSEntriesContainer* result){
+static bool process_directory(WideStringContainer* strings, WideStringContainerIndex directoryNameIndex
+                              , FSEntriesContainer* result){
     u16 searchPathBuffer[MAX_PATH + 1];
     SecureZeroMemory(searchPathBuffer, sizeof(searchPathBuffer));
-    lstrcpyW(searchPathBuffer, directoryPath);
+    if (! WideStringContainer_copy(strings, directoryNameIndex, searchPathBuffer)){
+        ODS(L"Failed to get processed directory name from the string");
+        return false;
+    }
+
     //this is stupid, but hey such a life of a programmer
     if (! PathAppendW(searchPathBuffer, L"\\*")){
         ODS(L"Appending * failed");
@@ -59,13 +62,19 @@ static bool process_directory(u16* directoryPath, FSEntriesContainer* result){
             if (isHidden){
                 continue;
             }
-                    
-            if (! FSEntriesContainer_add(result, findData.cFileName, isDirectory)){
+
+            WideStringContainerIndex nameIndex;
+            if (! WideStringContainer_add(strings, findData.cFileName, &nameIndex)){
+                hasError = true;
+                ODS(L"Failed to add string to the collection"); ODS(findData.cFileName);
+                break;
+            }
+
+            FSEntry entry = {.isDirectory = isDirectory, .nameIndex = nameIndex};
+            if (! FSEntriesContainer_add(result, entry)){
                 ODS(L"Failed to add item to the container");
                 keepSearching = false;
                 hasError = true;
-            } else {
-                ODS(findData.cFileName);
             }
         } else {
             //what went wrong?
@@ -90,8 +99,6 @@ static bool process_directory(u16* directoryPath, FSEntriesContainer* result){
 }
 
 
-
-static WorkQueueEntry currentWorkQueueEntry; //I HATE GCC
 void entry_point(){
     HANDLE hHeap = HeapCreate(0, 0, 0);
     if (hHeap == NULL){
@@ -103,19 +110,25 @@ void entry_point(){
     GUID documentsFolderId = {0xFDD39AD0, 0x238F, 0x46AF, {0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7}};
     HRESULT ret = SHGetKnownFolderPath(&documentsFolderId, KF_FLAG_DEFAULT, NULL, &folderPath);
     if (S_OK == ret){
-        u16 currentlyProcessedDirectoryPath[MAX_PATH + 1];
+        u16 rootDirectoryPath[MAX_PATH + 1];
             
         ODS(folderPath);
 
-        SecureZeroMemory(currentlyProcessedDirectoryPath, sizeof(currentlyProcessedDirectoryPath));
-        lstrcpyW(currentlyProcessedDirectoryPath, folderPath);
+        SecureZeroMemory(rootDirectoryPath, sizeof(rootDirectoryPath));
+        lstrcpyW(rootDirectoryPath, folderPath);
         CoTaskMemFree(folderPath);
         folderPath = NULL;
 
-        if (PathAppendW(currentlyProcessedDirectoryPath, L"OpenHereContent")){
-            if (! CreateDirectoryW(currentlyProcessedDirectoryPath, NULL)){
+        if (PathAppendW(rootDirectoryPath, L"OpenHereContent")){
+            if (! CreateDirectoryW(rootDirectoryPath, NULL)){
                 if (GetLastError() != ERROR_ALREADY_EXISTS){
                     ODS(L"My Documents do not exists");
+                    goto exit;
+                }
+
+                WideStringContainer strings;
+                if (! WideStringContainer_init(&strings, hHeap)){
+                    ODS(L"Failed to initialize strings container");
                     goto exit;
                 }
 
@@ -132,8 +145,15 @@ void entry_point(){
                 }
 
 
+                WideStringContainerIndex rootDirectoryPathIndex;
+                if (! WideStringContainer_add(&strings, rootDirectoryPath, &rootDirectoryPathIndex)){
+                    ODS(L"Failed to add rootDirectoryPath to strings");
+                    goto exit;
+                }
+
+                WorkQueueEntry currentWorkQueueEntry;
                 SecureZeroMemory(&currentWorkQueueEntry, sizeof(WorkQueueEntry));
-                lstrcpyW(currentWorkQueueEntry.fullPath, currentlyProcessedDirectoryPath);
+                currentWorkQueueEntry.fullPathIndex = rootDirectoryPathIndex;
                 currentWorkQueueEntry.parentIndex = -1;
                 
 
@@ -142,12 +162,16 @@ void entry_point(){
                     goto exit;
                 }
 
-                SecureZeroMemory(currentlyProcessedDirectoryPath, sizeof(currentlyProcessedDirectoryPath));
-
+                SecureZeroMemory(rootDirectoryPath, sizeof(rootDirectoryPath));
+                
                 while (WorkQueue_dequeue(&workQueue, &currentWorkQueueEntry)){
-                    ODS(L"Processing:"); ODS(currentWorkQueueEntry.fullPath);
+                    u16* currentlyProcessedDirectoryPath;
+                    WideStringContainer_getStringPtr(&strings, currentWorkQueueEntry.fullPathIndex, &currentlyProcessedDirectoryPath);
+                    ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
+
+                    
                     FSEntriesContainer container;
-                    if (! FSEntriesContainer_init(&container, hHeap, currentWorkQueueEntry.fullPath)){
+                    if (! FSEntriesContainer_init(&container, hHeap, currentWorkQueueEntry.fullPathIndex)){
                         ODS(L"Failed to initialize FS Entries container");
                         goto exit;
                     }
@@ -155,24 +179,41 @@ void entry_point(){
                     container.parentIndex = currentWorkQueueEntry.parentIndex;
                     container.indexInParent = currentWorkQueueEntry.indexInParent;
 
-                    if (! process_directory(currentWorkQueueEntry.fullPath, &container)){
-                        ODS(L"Something went wrong processing following directory:"); ODS(currentWorkQueueEntry.fullPath);
+                    if (! process_directory(&strings, currentWorkQueueEntry.fullPathIndex, &container)){
+                        ODS(L"Something went wrong processing following directory:"); ODS(currentlyProcessedDirectoryPath);
                         goto exit;
                     };
 
                     //if there are subdirectories, add them to the queue
                     for (uint i = 0; i < container.nDirectories; i += 1){
-                        WorkQueueEntry subDirectoryEntry;
-                        SecureZeroMemory(&subDirectoryEntry, sizeof(WorkQueueEntry));
-                        subDirectoryEntry.parentIndex = directories.nEntries - 1;
-                        subDirectoryEntry.indexInParent = i;
+                        const FSEntry subDirectoryEntry = container.entries[i];
 
-                        const u16* subDirectoryName = container.memory + container.indexes[i].offset;
-                        lstrcpyW(subDirectoryEntry.fullPath, currentWorkQueueEntry.fullPath);
-                        PathAppendW(subDirectoryEntry.fullPath, subDirectoryName);
+                        u16* subDirectoryName;
+                        if (! WideStringContainer_getStringPtr(&strings, subDirectoryEntry.nameIndex, &subDirectoryName)){
+                            ODS(L"Major fuckup");
+                            goto exit;
+                        }
+                        
+                        u16 subDirectoryFullPath[MAX_PATH + 1];
+                        SecureZeroMemory(subDirectoryFullPath, sizeof(subDirectoryFullPath));
+                        lstrcpyW(subDirectoryFullPath, currentlyProcessedDirectoryPath);
+                        PathAppendW(subDirectoryFullPath, subDirectoryName); //TODO: error check
 
-                        if (! WorkQueue_enqueue(&workQueue, subDirectoryEntry)){
-                            ODS(L"Failed to enqueue a path:"); ODS(subDirectoryEntry.fullPath);
+                        WideStringContainerIndex subDirectoryFullPathIndex;
+                        if (! WideStringContainer_add(&strings, subDirectoryFullPath, &subDirectoryFullPathIndex)){
+                            ODS(L"Another major fuck up");
+                            goto exit;
+                        }
+
+                        WorkQueueEntry subDirectoryQueueEntry;
+                        SecureZeroMemory(&subDirectoryQueueEntry, sizeof(WorkQueueEntry));
+
+                        subDirectoryQueueEntry.parentIndex = directories.nEntries - 1;
+                        subDirectoryQueueEntry.indexInParent = i;
+                        subDirectoryQueueEntry.fullPathIndex = subDirectoryFullPathIndex;
+
+                        if (! WorkQueue_enqueue(&workQueue, subDirectoryQueueEntry)){
+                            ODS(L"Failed to enqueue a path:"); ODS(subDirectoryFullPath);
                             goto exit;
                         };
                     }
@@ -182,15 +223,16 @@ void entry_point(){
                         goto exit;
                     }
 
-                    SecureZeroMemory(currentlyProcessedDirectoryPath, sizeof(currentlyProcessedDirectoryPath));
                 }
 
 
-                for (uint i = 0; i < directories.nEntries; i += 1){
-                    FSEntriesContainer directory = directories.data[i];
-                    ODS(L"Walking:"); ODS(directory.rootDirectory);
+                ODS(L"All the strings:");
+                for (uint i = 0; i < strings.nEntries; i += 1){
+                    u16* string;
+                    WideStringContainer_getStringPtr(&strings, i, &string);
+                    ODS(string);
                 }
-                ODS(L"Walking is done");
+                ODS(L"Done");
             }
 
 
