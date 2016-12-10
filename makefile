@@ -39,3 +39,11 @@ installer.o:
 installer: installer.o
 	@rm -f $(BINDIR)/installer.exe
 	$(LINK) $(OBJDIR)/installer.o -e entry_point -o $(BINDIR)/installer.exe $(LIBS) -luuid -luser32 -lNtosKrnl -ladvapi32
+
+extension.o:
+	@rm -f $(OBJDIR)/extension.o > NUL
+	$(CC) -shared src/extension.c -o $(OBJDIR)/extension.o
+
+extension: extension.o
+	@rm -f $(BINDIR)/extension.dll
+	$(LINK) $(OBJDIR)/extension.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl
