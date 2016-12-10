@@ -12,3 +12,4 @@ typedef intmax_t sint;
 typedef USHORT u16;
 
 #define ODS(x) OutputDebugStringW(x)
+//#define ODS(x) (void)0

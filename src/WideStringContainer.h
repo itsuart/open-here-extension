@@ -25,3 +25,5 @@ bool WideStringContainer_add(WideStringContainer* pContainer, u16* string, WideS
 bool WideStringContainer_copy(WideStringContainer* pContainer, WideStringContainerIndex requestedStringIndex, u16* copyBuffer);
 
 bool WideStringContainer_getStringPtr(WideStringContainer* pContainer, WideStringContainerIndex requestedStringIndex, u16** pResult);
+
+void WideStringContainer_clear(WideStringContainer* pContainer);

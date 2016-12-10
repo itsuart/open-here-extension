@@ -46,8 +46,8 @@ installer: installer.o
 
 extension.o:
 	@rm -f $(OBJDIR)/extension.o > NUL
-	$(CC) -shared src/extension.c -o $(OBJDIR)/extension.o
+	$(CC) -Wno-pointer-to-int-cast -Wno-discarded-qualifiers -shared src/extension.c -o $(OBJDIR)/extension.o
 
-extension: extension.o
+extension: extension.o  WorkQueue.o DirectoriesContainer.o
 	@rm -f $(BINDIR)/extension.dll
-	$(LINK) $(OBJDIR)/extension.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl
+	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl

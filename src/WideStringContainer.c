@@ -102,3 +102,10 @@ bool WideStringContainer_getStringPtr(WideStringContainer* pContainer, uint requ
 
     return true;
 }
+
+void WideStringContainer_clear(WideStringContainer* pContainer){
+    SecureZeroMemory(pContainer->memory, pContainer->memoryCapacity * sizeof(u16));
+    SecureZeroMemory(pContainer->offsets, pContainer->entriesCapacity * sizeof(uint));
+    pContainer->nEntries = 0;
+    pContainer->nextFreeOffset = 0;
+}
