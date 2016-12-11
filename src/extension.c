@@ -9,6 +9,8 @@
 #include "DirectoriesContainer.h"
 #include "WorkQueue.h"
 #include "WideStringContainer.h"
+#include "HMenuStorage.h"
+#include "MenuCommandsMapping.h"
 
 /* GLOBALS */
 #include "common.c"
@@ -45,7 +47,8 @@ typedef struct tag_IMyObj{
     WorkQueue workQueue;
     DirectoriesContainer directories;
 
-    HMENU hMenu;
+    HMenuStorage menus;
+    MenuCommandsMapping commandsMapping;
     HANDLE hHeap;
 } IMyObj;
 
@@ -76,20 +79,35 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* p
         ODS(L"VERB");
         return E_INVALIDARG;
     }
-
-    /*
     IMyObj* pBase = pImpl->pBase;
     uint itemIndex = (WORD)pVerb;
-    const FSEntryIndexEntry currentIndexEntry = pBase->container.indexes[itemIndex];
-    const u16* itemName = pBase->container.memory + currentIndexEntry.offset;
 
+    if (pBase->menus.nEntries == 0){
+        //we didn't create any menus. This only can happen if root directory was devoid of displayable content
+        //so, open it up in Explorer
+        ShellExecuteW(NULL, NULL, pBase->rootDirectory, NULL, NULL, SW_SHOW);
+        ODS(L"Opening root folder");
+        return S_OK;
+    }
+
+    if (itemIndex >= pBase->commandsMapping.nEntries){
+        ODS(L"itemIndex >= commandsMapping.nEntries");
+        return E_INVALIDARG;
+    }
+
+    MappingEntry commandMapping= pBase->commandsMapping.entries[itemIndex];
     u16 fullItemPath[MAX_PATH];
     SecureZeroMemory(fullItemPath, sizeof(fullItemPath));
-    lstrcpyW(fullItemPath, pBase->container.rootDirectory);
+    //TODO: erorr check
+    WideStringContainer_copy(&pBase->strings, commandMapping.directoryPathIndex, fullItemPath);
+    u16* itemName;
+    //TODO: error check
+    WideStringContainer_getStringPtr(&pBase->strings, commandMapping.itemNameIndex, &itemName);
     PathAppendW(fullItemPath, itemName);
-    ODS(fullItemPath);
+
+    ODS(L"EXECUTING:");ODS(fullItemPath);
     ShellExecuteW(NULL, NULL, fullItemPath, NULL, pBase->workingDirectory, pCommandInfo->nShow);
-    */
+
     return S_OK;
 }
 
@@ -180,10 +198,187 @@ static bool process_directory(WideStringContainer* strings, WideStringContainerI
     return (! hasError);
 }
 
+static bool collect_content(IMyObj* pBase){
+    //see if root directory exists
+    if (! CreateDirectoryW(pBase->rootDirectory, NULL)){
+        if (GetLastError() != ERROR_ALREADY_EXISTS){
+            //Well, what can you do? Absolutely nothing
+            return false;
+        }
+    }
+
+    //initialize or work queue with root directory
+    WideStringContainerIndex rootDirectoryPathIndex;
+    if (! WideStringContainer_add(&pBase->strings, pBase->rootDirectory, &rootDirectoryPathIndex)){
+        ODS(L"Failed to add rootDirectoryPath to strings");
+        return false;
+    }
+
+    WorkQueueEntry currentWorkQueueEntry;
+    SecureZeroMemory(&currentWorkQueueEntry, sizeof(WorkQueueEntry));
+    currentWorkQueueEntry.fullPathIndex = rootDirectoryPathIndex;
+    currentWorkQueueEntry.parentIndex = -1;
+                
+
+    if (! WorkQueue_enqueue(&pBase->workQueue, currentWorkQueueEntry)){
+        ODS(L"Failed to enqueue root directory for processing");
+        return false;
+    }
+
+    //collect the content
+    while (WorkQueue_dequeue(&pBase->workQueue, &currentWorkQueueEntry)){
+        u16* currentlyProcessedDirectoryPath;
+        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex, 
+                                         &currentlyProcessedDirectoryPath);
+        //        ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
+
+                    
+        FSEntriesContainer container;
+        if (! FSEntriesContainer_init(&container, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
+            ODS(L"Failed to initialize FS Entries container");
+            return false;
+        }
+
+        container.parentIndex = currentWorkQueueEntry.parentIndex;
+        container.indexInParent = currentWorkQueueEntry.indexInParent;
+
+        if (! process_directory(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &container)){
+            ODS(L"Something went wrong processing following directory:"); ODS(currentlyProcessedDirectoryPath);
+            return false;
+        };
+
+        //if there are subdirectories, add them to the queue
+        for (uint i = 0; i < container.nDirectories; i += 1){
+            const FSEntry subDirectoryEntry = container.entries[i];
+
+            u16* subDirectoryName;
+            if (! WideStringContainer_getStringPtr(&pBase->strings, subDirectoryEntry.nameIndex, &subDirectoryName)){
+                ODS(L"Major fuckup");
+                return false;
+            }
+                        
+            u16 subDirectoryFullPath[MAX_PATH + 1];
+            SecureZeroMemory(subDirectoryFullPath, sizeof(subDirectoryFullPath));
+            lstrcpyW(subDirectoryFullPath, currentlyProcessedDirectoryPath);
+            PathAppendW(subDirectoryFullPath, subDirectoryName); //TODO: error check
+
+            WideStringContainerIndex subDirectoryFullPathIndex;
+            if (! WideStringContainer_add(&pBase->strings, subDirectoryFullPath, &subDirectoryFullPathIndex)){
+                ODS(L"Another major fuck up");
+                return false;
+            }
+
+            WorkQueueEntry subDirectoryQueueEntry;
+            SecureZeroMemory(&subDirectoryQueueEntry, sizeof(WorkQueueEntry));
+
+            subDirectoryQueueEntry.parentIndex = pBase->directories.nEntries - 1;
+            subDirectoryQueueEntry.indexInParent = i;
+            subDirectoryQueueEntry.fullPathIndex = subDirectoryFullPathIndex;
+
+            if (! WorkQueue_enqueue(&pBase->workQueue, subDirectoryQueueEntry)){
+                ODS(L"Failed to enqueue a path:"); ODS(subDirectoryFullPath);
+                return false;
+            };
+        }
+
+        if (! DirectoriesContainer_add(&pBase->directories, container)){
+            ODS(L"DirectoriesContainer_add failed");
+            return false;
+        }
+
+    }
+
+    return true;
+}
+
+static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandId){
+    //go backwards and build up our menus
+    uint nextFreeCommandId = idCmdFirst;
+    
+    for (sint i = pBase->directories.nEntries - 1; i >= 0; i -= 1){
+        FSEntriesContainer currentDirectoryContents = pBase->directories.data[i];
+        if (currentDirectoryContents.nEntries == 0){
+            //directory is empty
+            if (currentDirectoryContents.parentIndex >= 0){
+                pBase->directories
+                    .data[currentDirectoryContents.parentIndex]
+                    .entries[currentDirectoryContents.indexInParent]
+                    .isEmptyDirectory = true;
+            }
+            continue;
+        }
+
+        //we have some entries in this directory, let put them into a menu
+        HMENU menu = CreateMenu();
+        if (menu == NULL){
+            //TODO: do some proper error handling and reporting here
+            ODS(L"Failed to create menu");
+            return false;
+        }
+
+        uint menuIndex = 0;
+        HMenuStorage_add(&pBase->menus, menu, &menuIndex);
+
+        if (currentDirectoryContents.parentIndex >= 0){
+            pBase->directories
+                .data[currentDirectoryContents.parentIndex]
+                .entries[currentDirectoryContents.indexInParent]
+                .subMenuIndex = menuIndex;
+        }
+        
+        for (uint fsEntryIndex = 0; fsEntryIndex < currentDirectoryContents.nEntries; fsEntryIndex += 1){
+            FSEntry currentFSEntry = currentDirectoryContents.entries[fsEntryIndex];
+
+            u16* currentEntryName = NULL;
+            if (! WideStringContainer_getStringPtr(&pBase->strings, currentFSEntry.nameIndex, &currentEntryName)){
+                ODS(L"Oh wow");
+                return false;
+            };
+            ODS(currentEntryName);
+            
+            if (currentFSEntry.isDirectory){
+                if (currentFSEntry.isEmptyDirectory){
+                    InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, currentEntryName);
+
+                    MappingEntry mappingEntry = {
+                        .directoryPathIndex = currentDirectoryContents.nameIndex,
+                        .itemNameIndex = currentFSEntry.nameIndex
+                    };
+                    //TODO: error check
+                    MenuCommandsMapping_add(&pBase->commandsMapping, mappingEntry, NULL);
+
+                    nextFreeCommandId += 1;
+                } else {
+                    //non-empty directory
+                    //NOTE: subMenuIndex couldn't be possible 0, could it ?
+                    InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING | MF_POPUP, pBase->menus.entries[currentFSEntry.subMenuIndex], currentEntryName);
+                    //TODO: should I still increment nextFreeCommandId ???
+                }
+            } else {
+                //NOT DIRECTORY
+                InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, currentEntryName);
+                
+                MappingEntry mappingEntry = {
+                    .directoryPathIndex = currentDirectoryContents.nameIndex,
+                    .itemNameIndex = currentFSEntry.nameIndex
+                };
+                //TODO: error check this too
+                MenuCommandsMapping_add(&pBase->commandsMapping, mappingEntry, NULL);
+                
+                nextFreeCommandId += 1;
+            }
+        }
+
+    }
+
+    *pNextFreeCommandId = nextFreeCommandId;
+    return true;
+}
+
 
 HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl* pImpl, 
                                                            HMENU hmenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags){
-    ODS(L"QueryContextMenu");
+    ODS(L"QueryContextMenu START");
     IMyObj* pBase = pImpl->pBase;
     
     //if we failed to acquire worknig directory...
@@ -203,131 +398,45 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
     }
 
-    if (pBase->hMenu != NULL){
-        DestroyMenu(pBase->hMenu);
-        pBase->hMenu = NULL;
-    }
-
     //clear all previous data if any
+    HMenuStorage_clear(&pBase->menus);
+    MenuCommandsMapping_clear(&pBase->commandsMapping);
     WideStringContainer_clear(&pBase->strings);
     DirectoriesContainer_clear(&pBase->directories);
     WorkQueue_clear(&pBase->workQueue);
 
-    //see if root directory exists
-    if (! CreateDirectoryW(pBase->rootDirectory, NULL)){
-        if (GetLastError() != ERROR_ALREADY_EXISTS){
-            //Well, what can you do? Absolutely nothing
-            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-        }
-    }
+    //return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 
-    //initialize or work queue with root directory
-    WideStringContainerIndex rootDirectoryPathIndex;
-    if (! WideStringContainer_add(&pBase->strings, pBase->rootDirectory, &rootDirectoryPathIndex)){
-        ODS(L"Failed to add rootDirectoryPath to strings");
+    ODS(L"Collecting content");
+
+    if (! collect_content(pBase)){
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
     }
 
-    WorkQueueEntry currentWorkQueueEntry;
-    SecureZeroMemory(&currentWorkQueueEntry, sizeof(WorkQueueEntry));
-    currentWorkQueueEntry.fullPathIndex = rootDirectoryPathIndex;
-    currentWorkQueueEntry.parentIndex = -1;
-                
-
-    if (! WorkQueue_enqueue(&pBase->workQueue, currentWorkQueueEntry)){
-        ODS(L"Failed to enqueue root directory for processing");
+    ODS(L"Creating menus");
+    uint nextFreeCommandId = idCmdFirst;
+    if (! create_menus(pBase, idCmdFirst, &nextFreeCommandId)){
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
     }
 
-    //collect the content
-    while (WorkQueue_dequeue(&pBase->workQueue, &currentWorkQueueEntry)){
-        u16* currentlyProcessedDirectoryPath;
-        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex, 
-                                         &currentlyProcessedDirectoryPath);
-        //        ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
+    if (pBase->menus.nEntries == 0){
+        //root directory was empty
+        InsertMenu(hmenu, -1, MF_BYPOSITION | MF_SEPARATOR, nextFreeCommandId, NULL);
+        nextFreeCommandId += 1;
+        InsertMenu(hmenu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, L"Open OpenHereContent");
+    } else {
+        //Since we going backwards, last entry in our menu storage is our content menu
+        HMENU contentMenu = pBase->menus.entries[pBase->menus.nEntries - 1];
 
-                    
-        FSEntriesContainer container;
-        if (! FSEntriesContainer_init(&container, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
-            ODS(L"Failed to initialize FS Entries container");
-            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-        }
-
-        container.parentIndex = currentWorkQueueEntry.parentIndex;
-        container.indexInParent = currentWorkQueueEntry.indexInParent;
-
-        if (! process_directory(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &container)){
-            ODS(L"Something went wrong processing following directory:"); ODS(currentlyProcessedDirectoryPath);
-            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-        };
-
-        //if there are subdirectories, add them to the queue
-        for (uint i = 0; i < container.nDirectories; i += 1){
-            const FSEntry subDirectoryEntry = container.entries[i];
-
-            u16* subDirectoryName;
-            if (! WideStringContainer_getStringPtr(&pBase->strings, subDirectoryEntry.nameIndex, &subDirectoryName)){
-                ODS(L"Major fuckup");
-                return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-            }
-                        
-            u16 subDirectoryFullPath[MAX_PATH + 1];
-            SecureZeroMemory(subDirectoryFullPath, sizeof(subDirectoryFullPath));
-            lstrcpyW(subDirectoryFullPath, currentlyProcessedDirectoryPath);
-            PathAppendW(subDirectoryFullPath, subDirectoryName); //TODO: error check
-
-            WideStringContainerIndex subDirectoryFullPathIndex;
-            if (! WideStringContainer_add(&pBase->strings, subDirectoryFullPath, &subDirectoryFullPathIndex)){
-                ODS(L"Another major fuck up");
-                return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-            }
-
-            WorkQueueEntry subDirectoryQueueEntry;
-            SecureZeroMemory(&subDirectoryQueueEntry, sizeof(WorkQueueEntry));
-
-            subDirectoryQueueEntry.parentIndex = pBase->directories.nEntries - 1;
-            subDirectoryQueueEntry.indexInParent = i;
-            subDirectoryQueueEntry.fullPathIndex = subDirectoryFullPathIndex;
-
-            if (! WorkQueue_enqueue(&pBase->workQueue, subDirectoryQueueEntry)){
-                ODS(L"Failed to enqueue a path:"); ODS(subDirectoryFullPath);
-                return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-            };
-        }
-
-        if (! DirectoriesContainer_add(&pBase->directories, container)){
-            ODS(L"DirectoriesContainer_add failed");
-            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-        }
+        //OK, now create root menu and link it with content menu
+        InsertMenu(hmenu, -1, MF_BYPOSITION | MF_SEPARATOR, nextFreeCommandId, NULL);
+        InsertMenu(hmenu, -1, MF_BYPOSITION | MF_POPUP | MF_STRING, contentMenu, L"Open Here");
 
     }
 
-    ODS(L"All the strings:");
-    for (uint i = 0; i < pBase->strings.nEntries; i += 1){
-        u16* string;
-        WideStringContainer_getStringPtr(&pBase->strings, i, &string);
-        ODS(string);
-    }
-    ODS(L"Done");
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+    ODS(L"QueryContextMenu END");
 
-    //create all the menues
-    HMENU contentMenu = CreateMenu();
-    if (contentMenu == NULL){
-        ODS(L"CreateMenu failed");
-        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-    }
-    pBase->hMenu = contentMenu;
-    
-    UINT nextFreeCommandId = idCmdFirst;
-
-    //insert our menu items: separator, copy and move in that order.
-    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_SEPARATOR, nextFreeCommandId, NULL);
-    InsertMenu(hmenu, -1, MF_BYPOSITION | MF_POPUP | MF_STRING, contentMenu, L"Open Here");
-
-    ODS(L"QueryContextMenu");
-
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, nextFreeCommandId + 1);
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, nextFreeCommandId - idCmdFirst + 1);
 }
 
 
@@ -432,14 +541,13 @@ ULONG STDMETHODCALLTYPE myObj_Release(IMyObj* pMyObj){
     long int nRefs = pMyObj->refsCount;
 
     if (nRefs == 0){
+        HMenuStorage_clear(&pMyObj->menus);
+        
         if (pMyObj->hHeap != NULL){
             HeapDestroy(pMyObj->hHeap);
             pMyObj->hHeap = NULL;
         }
-        if (pMyObj->hMenu != NULL){
-            DestroyMenu(pMyObj->hMenu);
-            pMyObj->hMenu = NULL;
-        }
+
         GlobalFree(pMyObj);
     }
 
@@ -528,6 +636,18 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
 
        if (! DirectoriesContainer_init(&pMyObj->directories, hHeap)){
            ODS(L"Failed to initialize directories container");
+           HeapDestroy(hHeap);
+           return E_OUTOFMEMORY;
+       }
+
+       if (! HMenuStorage_init(&pMyObj->menus, hHeap)){
+           ODS(L"Failed to initialize HMenuStorage");
+           HeapDestroy(hHeap);
+           return E_OUTOFMEMORY;
+       }
+
+       if (! MenuCommandsMapping_init(&pMyObj->commandsMapping, hHeap)){
+           ODS(L"Failed to initialize MenuCommandsMapping");
            HeapDestroy(hHeap);
            return E_OUTOFMEMORY;
        }

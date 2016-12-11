@@ -5,11 +5,13 @@
 typedef struct tag_FSEntry {
     WideStringContainerIndex nameIndex;
     bool isDirectory; //TODO: not perfect memory usage (63 bits wasted)
+    bool isEmptyDirectory; //TODO: same (62 bits wasted)
+    uint subMenuIndex;
 } FSEntry;
 
 typedef struct tag_FSEntriesContainer {
     HANDLE hHeap;
-    WideStringContainerIndex nameIndex;
+    WideStringContainerIndex nameIndex; //full path of the directory
     uint nEntries;
     uint nDirectories;
     uint capacity;

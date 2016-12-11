@@ -46,8 +46,16 @@ installer: installer.o
 
 extension.o:
 	@rm -f $(OBJDIR)/extension.o > NUL
-	$(CC) -Wno-pointer-to-int-cast -Wno-discarded-qualifiers -shared src/extension.c -o $(OBJDIR)/extension.o
+	$(CC) -Wno-pointer-to-int-cast -Wno-discarded-qualifiers -Wno-incompatible-pointer-types -shared src/extension.c -o $(OBJDIR)/extension.o
 
-extension: extension.o  WorkQueue.o DirectoriesContainer.o
+HMenuStorage.o:
+	@rm -f $(OBJDIR)/HMenuStorage.o > NUL
+	$(CC) src/HMenuStorage.c -o $(OBJDIR)/HMenuStorage.o
+
+MenuCommandsMapping.o:
+	@rm -f $(OBJDIR)/MenuCommandsMapping.o > NUL
+	$(CC) src/MenuCommandsMapping.c -o $(OBJDIR)/MenuCommandsMapping.o
+
+extension: extension.o  WorkQueue.o DirectoriesContainer.o HMenuStorage.o MenuCommandsMapping.o
 	@rm -f $(BINDIR)/extension.dll
-	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl
+	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o $(OBJDIR)/HMenuStorage.o $(OBJDIR)/MenuCommandsMapping.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl
