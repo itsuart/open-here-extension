@@ -56,6 +56,10 @@ MenuCommandsMapping.o:
 	@rm -f $(OBJDIR)/MenuCommandsMapping.o > NUL
 	$(CC) src/MenuCommandsMapping.c -o $(OBJDIR)/MenuCommandsMapping.o
 
-extension: extension.o  WorkQueue.o DirectoriesContainer.o HMenuStorage.o MenuCommandsMapping.o
+HBitmapStorage.o:
+	@rm -f $(OBJDIR)/HBitmapStorage.o > NUL
+	$(CC) src/HBitmapStorage.c -o $(OBJDIR)/HBitmapStorage.o
+
+extension: extension.o  WorkQueue.o DirectoriesContainer.o HMenuStorage.o MenuCommandsMapping.o HBitmapStorage.o
 	@rm -f $(BINDIR)/extension.dll
-	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o $(OBJDIR)/HMenuStorage.o $(OBJDIR)/MenuCommandsMapping.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl
+	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o $(OBJDIR)/HMenuStorage.o $(OBJDIR)/HBitmapStorage.o $(OBJDIR)/MenuCommandsMapping.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl -lGdi32

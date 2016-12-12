@@ -11,6 +11,7 @@
 #include "WideStringContainer.h"
 #include "HMenuStorage.h"
 #include "MenuCommandsMapping.h"
+#include "HBitmapStorage.h"
 
 /* GLOBALS */
 #include "common.c"
@@ -47,8 +48,10 @@ typedef struct tag_IMyObj{
     WorkQueue workQueue;
     DirectoriesContainer directories;
 
+    HBitmapStorage bitmaps;
     HMenuStorage menus;
     MenuCommandsMapping commandsMapping;
+    u16* displayNamesBuffer;
     HANDLE hHeap;
 } IMyObj;
 
@@ -214,18 +217,18 @@ static bool collect_content(IMyObj* pBase){
         return false;
     }
 
-    WorkQueueEntry currentWorkQueueEntry;
-    SecureZeroMemory(&currentWorkQueueEntry, sizeof(WorkQueueEntry));
-    currentWorkQueueEntry.fullPathIndex = rootDirectoryPathIndex;
-    currentWorkQueueEntry.parentIndex = -1;
-                
+    WorkQueueEntry rootWorkQueueEntry = {
+        .fullPathIndex = rootDirectoryPathIndex,
+        .parentIndex = -1
+    };
 
-    if (! WorkQueue_enqueue(&pBase->workQueue, currentWorkQueueEntry)){
+    if (! WorkQueue_enqueue(&pBase->workQueue, rootWorkQueueEntry)){
         ODS(L"Failed to enqueue root directory for processing");
         return false;
     }
 
     //collect the content
+    WorkQueueEntry currentWorkQueueEntry = {.parentIndex = -1, .indexInParent = 0};
     while (WorkQueue_dequeue(&pBase->workQueue, &currentWorkQueueEntry)){
         u16* currentlyProcessedDirectoryPath;
         WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex, 
@@ -233,23 +236,28 @@ static bool collect_content(IMyObj* pBase){
         //        ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
 
                     
-        FSEntriesContainer container;
-        if (! FSEntriesContainer_init(&container, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
+        FSEntriesContainer currentDirectoryContent;
+        if (! FSEntriesContainer_init(&currentDirectoryContent, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
             ODS(L"Failed to initialize FS Entries container");
             return false;
         }
 
-        container.parentIndex = currentWorkQueueEntry.parentIndex;
-        container.indexInParent = currentWorkQueueEntry.indexInParent;
+        currentDirectoryContent.parentIndex = currentWorkQueueEntry.parentIndex;
+        currentDirectoryContent.indexInParent = currentWorkQueueEntry.indexInParent;
 
-        if (! process_directory(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &container)){
+        if (! process_directory(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &currentDirectoryContent)){
             ODS(L"Something went wrong processing following directory:"); ODS(currentlyProcessedDirectoryPath);
             return false;
         };
 
+        if (! DirectoriesContainer_add(&pBase->directories, currentDirectoryContent)){
+            ODS(L"DirectoriesContainer_add failed");
+            return false;
+        }
+
         //if there are subdirectories, add them to the queue
-        for (uint i = 0; i < container.nDirectories; i += 1){
-            const FSEntry subDirectoryEntry = container.entries[i];
+        for (uint i = 0; i < currentDirectoryContent.nDirectories; i += 1){
+            const FSEntry subDirectoryEntry = currentDirectoryContent.entries[i];
 
             u16* subDirectoryName;
             if (! WideStringContainer_getStringPtr(&pBase->strings, subDirectoryEntry.nameIndex, &subDirectoryName)){
@@ -280,21 +288,23 @@ static bool collect_content(IMyObj* pBase){
                 return false;
             };
         }
-
-        if (! DirectoriesContainer_add(&pBase->directories, container)){
-            ODS(L"DirectoriesContainer_add failed");
-            return false;
-        }
-
     }
 
     return true;
 }
 
 static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandId){
-    //go backwards and build up our menus
-    uint nextFreeCommandId = idCmdFirst;
+    //TODO: make this more memory efficient
+    pBase->displayNamesBuffer = (u16*)HeapAlloc(pBase->hHeap, HEAP_ZERO_MEMORY, pBase->strings.nEntries * (MAX_PATH + 1) * sizeof(u16));
+    if (pBase->displayNamesBuffer == NULL){
+        ODS(L"Failed to allocate displayNamesBuffer");
+        return false;
+    }
+    u16* currentDisplayName = pBase->displayNamesBuffer;
     
+    uint nextFreeCommandId = idCmdFirst;
+
+    //go backwards and build up our menus    
     for (sint i = pBase->directories.nEntries - 1; i >= 0; i -= 1){
         FSEntriesContainer currentDirectoryContents = pBase->directories.data[i];
         if (currentDirectoryContents.nEntries == 0){
@@ -313,6 +323,8 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
         if (menu == NULL){
             //TODO: do some proper error handling and reporting here
             ODS(L"Failed to create menu");
+            HeapFree(pBase->hHeap, 0, pBase->displayNamesBuffer);
+            pBase->displayNamesBuffer = NULL;
             return false;
         }
 
@@ -332,13 +344,59 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
             u16* currentEntryName = NULL;
             if (! WideStringContainer_getStringPtr(&pBase->strings, currentFSEntry.nameIndex, &currentEntryName)){
                 ODS(L"Oh wow");
+                HeapFree(pBase->hHeap, 0, pBase->displayNamesBuffer);
+                pBase->displayNamesBuffer = NULL;
                 return false;
             };
-            ODS(currentEntryName);
+
+            HBITMAP menuImage = NULL;
+
+            { //extract icon if exists
+                u16 fullEntryPath [MAX_PATH + 1];
+                SecureZeroMemory(fullEntryPath, sizeof(fullEntryPath));
+                WideStringContainer_copy(&pBase->strings, currentDirectoryContents.nameIndex, fullEntryPath);
+                PathAppendW(fullEntryPath, currentEntryName);
+
+                SHFILEINFOW fileInfo = {0};
+                //
+                if ( SHGetFileInfoW(fullEntryPath, 0, &fileInfo, sizeof(fileInfo), SHGFI_ICON  | SHGFI_SMALLICON | SHGFI_DISPLAYNAME  /*| SHGFI_ADDOVERLAYS */)){
+                    if (currentDisplayName != NULL){
+                        lstrcpyW(currentDisplayName, fileInfo.szDisplayName);
+                    }
+                    
+                    ODS(fileInfo.szDisplayName);
+                    ICONINFO iconInfo = {0};
+                    if ( GetIconInfo(fileInfo.hIcon, &iconInfo)){
+                        DeleteObject(iconInfo.hbmMask);
+
+                        menuImage = CopyImage(iconInfo.hbmColor, IMAGE_BITMAP, 0, 0, LR_COPYDELETEORG | LR_CREATEDIBSECTION);
+                        HBitmapStorage_add(&pBase->bitmaps, menuImage, NULL);
+                    }
+                    DestroyIcon(fileInfo.hIcon);
+
+                    //TODO: do something about displayName: we can't modify global WideStringStorage at this point.
+                } else {
+                    ODS(L"THE FUCK");
+                    currentDisplayName = NULL;
+                }
+            }
             
+            u16* effectiveDisplayName = currentDisplayName != NULL ? currentDisplayName : currentEntryName;
+
             if (currentFSEntry.isDirectory){
                 if (currentFSEntry.isEmptyDirectory){
-                    InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, currentEntryName);
+
+                    if (menuImage != NULL){
+                        MENUITEMINFOW menuItemInfo = {0};
+                        menuItemInfo.cbSize = sizeof(menuItemInfo);
+                        menuItemInfo.fMask = MIIM_BITMAP | MIIM_STRING | MIIM_ID;
+                        menuItemInfo.wID = nextFreeCommandId;
+                        menuItemInfo.hbmpItem = menuImage;
+                        menuItemInfo.dwTypeData = effectiveDisplayName;
+                        InsertMenuItemW(menu, -1, true, &menuItemInfo);
+                    } else {
+                        InsertMenuW(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, effectiveDisplayName);
+                    }
 
                     MappingEntry mappingEntry = {
                         .directoryPathIndex = currentDirectoryContents.nameIndex,
@@ -350,13 +408,33 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                     nextFreeCommandId += 1;
                 } else {
                     //non-empty directory
-                    //NOTE: subMenuIndex couldn't be possible 0, could it ?
-                    InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING | MF_POPUP, pBase->menus.entries[currentFSEntry.subMenuIndex], currentEntryName);
-                    //TODO: should I still increment nextFreeCommandId ???
+                    if (menuImage != NULL){
+                        MENUITEMINFOW menuItemInfo = {0};
+                        menuItemInfo.cbSize = sizeof(menuItemInfo);
+                        menuItemInfo.fMask = MIIM_BITMAP | MIIM_STRING | MIIM_SUBMENU;
+                        menuItemInfo.hSubMenu = pBase->menus.entries[currentFSEntry.subMenuIndex];
+                        menuItemInfo.hbmpItem = menuImage;
+                        menuItemInfo.dwTypeData = effectiveDisplayName;
+                        InsertMenuItemW(menu, -1, true, &menuItemInfo);
+                    } else {
+                        InsertMenuW(menu, -1, MF_BYPOSITION | MF_STRING | MF_POPUP, pBase->menus.entries[currentFSEntry.subMenuIndex], effectiveDisplayName);
+                    }
                 }
             } else {
                 //NOT DIRECTORY
-                InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, currentEntryName);
+
+                if (menuImage != NULL){
+                    MENUITEMINFOW menuItemInfo = {0};
+                    menuItemInfo.cbSize = sizeof(menuItemInfo);
+                    menuItemInfo.fMask = MIIM_BITMAP | MIIM_STRING | MIIM_ID;
+                    menuItemInfo.wID = nextFreeCommandId;
+                    menuItemInfo.hbmpItem = menuImage;
+                    menuItemInfo.dwTypeData = effectiveDisplayName;
+                    InsertMenuItemW(menu, -1, true, &menuItemInfo);
+                } else {
+                    InsertMenuW(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, effectiveDisplayName);
+                }
+
                 
                 MappingEntry mappingEntry = {
                     .directoryPathIndex = currentDirectoryContents.nameIndex,
@@ -368,6 +446,7 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                 nextFreeCommandId += 1;
             }
         }
+        currentDisplayName += (MAX_PATH + 1);
 
     }
 
@@ -399,11 +478,17 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl
     }
 
     //clear all previous data if any
+    HBitmapStorage_clear(&pBase->bitmaps);
     HMenuStorage_clear(&pBase->menus);
     MenuCommandsMapping_clear(&pBase->commandsMapping);
     WideStringContainer_clear(&pBase->strings);
     DirectoriesContainer_clear(&pBase->directories);
     WorkQueue_clear(&pBase->workQueue);
+    if (pBase->displayNamesBuffer != NULL){
+        HeapFree(pBase->hHeap, 0, pBase->displayNamesBuffer);
+        pBase->displayNamesBuffer = NULL;
+    }
+
 
     //return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 
@@ -530,7 +615,7 @@ static long int nObjectsAndRefs = 0;
 ULONG STDMETHODCALLTYPE myObj_AddRef(IMyObj* pMyObj){
     InterlockedIncrement(&nObjectsAndRefs);
 
-    InterlockedIncrement(&(pMyObj->refsCount));
+    InterlockedIncrement(&pMyObj->refsCount);
     return pMyObj->refsCount;
 }
 
@@ -542,6 +627,7 @@ ULONG STDMETHODCALLTYPE myObj_Release(IMyObj* pMyObj){
 
     if (nRefs == 0){
         HMenuStorage_clear(&pMyObj->menus);
+        HBitmapStorage_clear(&pMyObj->bitmaps);
         
         if (pMyObj->hHeap != NULL){
             HeapDestroy(pMyObj->hHeap);
@@ -650,6 +736,10 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
            ODS(L"Failed to initialize MenuCommandsMapping");
            HeapDestroy(hHeap);
            return E_OUTOFMEMORY;
+       }
+
+       if (! HBitmapStorage_init(&pMyObj->bitmaps, hHeap)){
+           ODS(L"Failed to initialize HBitmapStorage");
        }
 
        //Get path to "my documents"
