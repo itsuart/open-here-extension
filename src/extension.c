@@ -4,6 +4,7 @@
 #include <Shobjidl.h>
 #include <Shlobj.h>
 #include <Shlwapi.h>
+#include <ObjIdl.h>
 
 #include "FSEntriesContainer.h"
 #include "DirectoriesContainer.h"
@@ -15,6 +16,8 @@
 
 /* GLOBALS */
 #include "common.c"
+
+#include "com.h"
 
 /* FORWARD DECLARATION EVERYTHING */
 struct tag_IMyObj;
@@ -40,10 +43,10 @@ typedef struct tag_IMyObj{
     MyIShellExtInitImpl shellExtInitImpl;
 
     long int refsCount;
-    
+
     u16 workingDirectory[MAX_PATH + 1];
     u16 rootDirectory[MAX_PATH + 1];
-    
+
     WideStringContainer strings;
     WorkQueue workQueue;
     DirectoriesContainer directories;
@@ -59,19 +62,134 @@ typedef struct tag_IMyObj{
 
 /******************************* IContextMenu ***************************/
 
-HRESULT STDMETHODCALLTYPE myIContextMenuImpl_GetCommandString(MyIContextMenuImpl* pImpl, 
+HRESULT STDMETHODCALLTYPE myIContextMenuImpl_GetCommandString(MyIContextMenuImpl* pImpl,
                                                               UINT_PTR idCmd, UINT uFlags, UINT* pwReserved,LPSTR pszName,UINT cchMax){
     if ( (uFlags == GCS_VERBW) || (uFlags == GCS_VALIDATEW)){
         ODS(L"GetCommandString S_OK");
         return S_OK;
     } else{
-        ODS(L"GetCommandString S_FALSE");        
+        ODS(L"GetCommandString S_FALSE");
         return S_FALSE;
     }
 
     return E_INVALIDARG;
 }
 
+static void execute_item(const u16* fullItemPath, const u16* workingDirectory, int showCmd){
+    //See if it is a link file, and if it is, see if it has working directory set.
+    //If it is, then we copy link file to a temporary location and set it's working directory to one supplied to the function.
+    //Then we tell Windows to execute that, deleting the copy after.
+    //I'm doing this to not juggle with expansion of environment variables. Let Windows do that for us.
+    do {
+        IShellLinkW* pIShellLink = NULL;
+
+        HRESULT hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void**)&pIShellLink);
+        if (hr != S_OK) break;
+
+        IPersistFile* pIPersistFile = NULL;
+        hr = COM_CALL(pIShellLink, QueryInterface, &IID_IPersistFile, (void**) &pIPersistFile);
+        if (! SUCCEEDED(hr)){
+            COM_CALL0(pIShellLink, Release);
+            break;
+        }
+
+        hr = COM_CALL(pIPersistFile, Load, fullItemPath, 0);
+        if (! SUCCEEDED(hr)){
+            COM_RELEASE(pIPersistFile);
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+
+        static u16 linkTargetWorkingDirectory[MAX_UNICODE_PATH_LENGTH] = {0};
+        SecureZeroMemory(linkTargetWorkingDirectory, sizeof(linkTargetWorkingDirectory));
+
+        hr = COM_CALL(pIShellLink, GetWorkingDirectory, linkTargetWorkingDirectory, MAX_UNICODE_PATH_LENGTH);
+        if (! SUCCEEDED(hr)){
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+
+        if (linkTargetWorkingDirectory[0] != 0){
+            //working directory is set, we will respect that.
+            COM_RELEASE(pIPersistFile);
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+
+        //link working directory is empty, let us update it with our value.
+        hr = COM_CALL(pIShellLink, SetWorkingDirectory, workingDirectory);
+        if (! SUCCEEDED(hr)){
+            COM_RELEASE(pIPersistFile);
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+
+        //TODO: can we reuse linkTargetWorkingDirectory here?
+        static u16 tempLinkPath[MAX_UNICODE_PATH_LENGTH] = {0};
+        SecureZeroMemory(tempLinkPath, sizeof(tempLinkPath));
+
+        {
+            const uint max_size = sizeof(tempLinkPath) / sizeof(tempLinkPath[0]);
+            const uint pathLength = GetTempPathW(max_size, tempLinkPath);
+            if (pathLength == 0 || pathLength > max_size){
+                COM_RELEASE(pIPersistFile);
+                COM_RELEASE(pIShellLink);
+                break;
+            }
+
+            uint result = GetTempFileNameW(tempLinkPath, L"oh", 0, tempLinkPath);
+            if (result == 0){
+                COM_RELEASE(pIPersistFile);
+                COM_RELEASE(pIShellLink);
+                break;
+            }
+
+            //GetTempFileNameW creates file, so
+            DeleteFileW(tempLinkPath);
+
+            u16* pExtension = PathFindExtension(tempLinkPath);
+            if (*pExtension == 0){
+                //failed for some reason
+                COM_RELEASE(pIPersistFile);
+                COM_RELEASE(pIShellLink);
+                break;
+            }
+            //pExtension (should) point to '.', so
+
+            pExtension[1] = L'L';
+            pExtension[2] = L'N';
+            pExtension[3] = L'K';
+
+        }
+
+        hr = COM_CALL(pIPersistFile, Save, tempLinkPath, true);
+        if (! SUCCEEDED(hr)){
+            COM_RELEASE(pIPersistFile);
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+        hr = COM_CALL(pIPersistFile, SaveCompleted, tempLinkPath);
+        if (! SUCCEEDED(hr)){
+            COM_RELEASE(pIPersistFile);
+            COM_RELEASE(pIShellLink);
+            break;
+        }
+
+        //we are done with COM
+        COM_RELEASE(pIPersistFile);
+        COM_RELEASE(pIShellLink);
+
+        //execute the thing
+        ShellExecuteW(NULL, L"open", tempLinkPath, NULL, workingDirectory, showCmd);
+
+        //delete temp link
+        DeleteFileW(tempLinkPath);
+        return;
+    } while(0);
+
+    //if we are here - it is not a link file or it is, but it's working directory is set by user, so execute it as is
+    ShellExecuteW(NULL, L"open", fullItemPath, NULL, workingDirectory, showCmd);
+}
 
 //I really hate person that causes me "undefined reference to `___chkstk_ms'" errors. And extra calls to clear the memory.
 
@@ -79,7 +197,6 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* p
     void* pVerb = pCommandInfo->lpVerb;
 
     if (HIWORD(pVerb)){
-        ODS(L"VERB");
         return E_INVALIDARG;
     }
     IMyObj* pBase = pImpl->pBase;
@@ -88,13 +205,11 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* p
     if (pBase->menus.nEntries == 0){
         //we didn't create any menus. This only can happen if root directory was devoid of displayable content
         //so, open it up in Explorer
-        ShellExecuteW(NULL, NULL, pBase->rootDirectory, NULL, NULL, SW_SHOW);
-        ODS(L"Opening root folder");
+        ShellExecuteW(NULL, L"explore", pBase->rootDirectory, NULL, NULL, SW_SHOW);
         return S_OK;
     }
 
     if (itemIndex >= pBase->commandsMapping.nEntries){
-        ODS(L"itemIndex >= commandsMapping.nEntries");
         return E_INVALIDARG;
     }
 
@@ -108,8 +223,7 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_InvokeCommand(MyIContextMenuImpl* p
     WideStringContainer_getStringPtr(&pBase->strings, commandMapping.itemNameIndex, &itemName);
     PathAppendW(fullItemPath, itemName);
 
-    ODS(L"EXECUTING:");ODS(fullItemPath);
-    ShellExecuteW(NULL, NULL, fullItemPath, NULL, pBase->workingDirectory, pCommandInfo->nShow);
+    execute_item(fullItemPath, pBase->workingDirectory, pCommandInfo->nShow);
 
     return S_OK;
 }
@@ -231,11 +345,11 @@ static bool collect_content(IMyObj* pBase){
     WorkQueueEntry currentWorkQueueEntry = {.parentIndex = -1, .indexInParent = 0};
     while (WorkQueue_dequeue(&pBase->workQueue, &currentWorkQueueEntry)){
         u16* currentlyProcessedDirectoryPath;
-        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex, 
+        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex,
                                          &currentlyProcessedDirectoryPath);
         //        ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
 
-                    
+
         FSEntriesContainer currentDirectoryContent;
         if (! FSEntriesContainer_init(&currentDirectoryContent, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
             ODS(L"Failed to initialize FS Entries container");
@@ -264,7 +378,7 @@ static bool collect_content(IMyObj* pBase){
                 ODS(L"Major fuckup");
                 return false;
             }
-                        
+
             u16 subDirectoryFullPath[MAX_PATH + 1];
             SecureZeroMemory(subDirectoryFullPath, sizeof(subDirectoryFullPath));
             lstrcpyW(subDirectoryFullPath, currentlyProcessedDirectoryPath);
@@ -301,10 +415,10 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
         return false;
     }
     u16* currentDisplayName = pBase->displayNamesBuffer;
-    
+
     uint nextFreeCommandId = idCmdFirst;
 
-    //go backwards and build up our menus    
+    //go backwards and build up our menus
     for (sint i = pBase->directories.nEntries - 1; i >= 0; i -= 1){
         FSEntriesContainer currentDirectoryContents = pBase->directories.data[i];
         if (currentDirectoryContents.nEntries == 0){
@@ -337,7 +451,7 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                 .entries[currentDirectoryContents.indexInParent]
                 .subMenuIndex = menuIndex;
         }
-        
+
         for (uint fsEntryIndex = 0; fsEntryIndex < currentDirectoryContents.nEntries; fsEntryIndex += 1){
             FSEntry currentFSEntry = currentDirectoryContents.entries[fsEntryIndex];
 
@@ -363,8 +477,8 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                     if (currentDisplayName != NULL){
                         lstrcpyW(currentDisplayName, fileInfo.szDisplayName);
                     }
-                    
-                    ODS(fileInfo.szDisplayName);
+
+                    //                    ODS(fileInfo.szDisplayName);
                     ICONINFO iconInfo = {0};
                     if ( GetIconInfo(fileInfo.hIcon, &iconInfo)){
                         DeleteObject(iconInfo.hbmMask);
@@ -380,7 +494,7 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                     currentDisplayName = NULL;
                 }
             }
-            
+
             u16* effectiveDisplayName = currentDisplayName != NULL ? currentDisplayName : currentEntryName;
 
             if (currentFSEntry.isDirectory){
@@ -435,14 +549,14 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
                     InsertMenuW(menu, -1, MF_BYPOSITION | MF_STRING, nextFreeCommandId, effectiveDisplayName);
                 }
 
-                
+
                 MappingEntry mappingEntry = {
                     .directoryPathIndex = currentDirectoryContents.nameIndex,
                     .itemNameIndex = currentFSEntry.nameIndex
                 };
                 //TODO: error check this too
                 MenuCommandsMapping_add(&pBase->commandsMapping, mappingEntry, NULL);
-                
+
                 nextFreeCommandId += 1;
             }
         }
@@ -455,11 +569,11 @@ static bool create_menus(IMyObj* pBase, uint idCmdFirst, uint* pNextFreeCommandI
 }
 
 
-HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl* pImpl, 
+HRESULT STDMETHODCALLTYPE myIContextMenuImpl_QueryContextMenu(MyIContextMenuImpl* pImpl,
                                                            HMENU hmenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags){
     ODS(L"QueryContextMenu START");
     IMyObj* pBase = pImpl->pBase;
-    
+
     //if we failed to acquire worknig directory...
     if (pBase->workingDirectory[0] == 0){
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
@@ -628,7 +742,7 @@ ULONG STDMETHODCALLTYPE myObj_Release(IMyObj* pMyObj){
     if (nRefs == 0){
         HMenuStorage_clear(&pMyObj->menus);
         HBitmapStorage_clear(&pMyObj->bitmaps);
-        
+
         if (pMyObj->hHeap != NULL){
             HeapDestroy(pMyObj->hHeap);
             pMyObj->hHeap = NULL;
@@ -692,7 +806,7 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
        return CLASS_E_NOAGGREGATION;
    }
 
-   if (IsEqualGUID(pRequestedIID, &IID_IUnknown) 
+   if (IsEqualGUID(pRequestedIID, &IID_IUnknown)
        || IsEqualGUID(pRequestedIID, &IID_IContextMenu)
        || IsEqualGUID(pRequestedIID, &IID_IShellExtInit)
        ){
@@ -701,7 +815,7 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
        if (pMyObj == NULL){
            return E_OUTOFMEMORY;
        }
-       
+
        HANDLE hHeap = HeapCreate(0, 0, 0);
        if (hHeap == NULL){
            ODS(L"Failed to create heap");
@@ -767,7 +881,7 @@ HRESULT STDMETHODCALLTYPE classCreateInstance(IClassFactory* pClassFactory, IUnk
        }
 
        pMyObj->hHeap = hHeap;
-       
+
        pMyObj->lpVtbl = &IMyObjVtbl;
 
        pMyObj->contextMenuImpl.lpVtbl = &IMyIContextMenuVtbl;
@@ -804,7 +918,7 @@ HRESULT STDMETHODCALLTYPE classLockServer(IClassFactory* pClassFactory, BOOL flo
 
 HRESULT STDMETHODCALLTYPE classQueryInterface(IClassFactory* pClassFactory, REFIID requestedIID, void **ppv){
    // Check if the GUID matches an IClassFactory or IUnknown GUID.
-   if (! IsEqualGUID(requestedIID, &IID_IUnknown) && 
+   if (! IsEqualGUID(requestedIID, &IID_IUnknown) &&
        ! IsEqualGUID(requestedIID, &IID_IClassFactory)){
       // It doesn't. Clear his handle, and return E_NOINTERFACE.
       *ppv = 0;

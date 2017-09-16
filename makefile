@@ -5,8 +5,9 @@ OBJDIR = obj
 BINDIR = bin
 COMMON_OBJ = $(OBJDIR)/WideStringContainer.o $(OBJDIR)/FSEntriesContainer.o $(OBJDIR)/DirectoriesContainer.o $(OBJDIR)/WorkQueue.o
 
+all: installer extension
 
-clear_all_objs:	
+clear_all_objs:
 	@rm -f $(OBJDIR)/*.o > NUL
 
 mem.o:
