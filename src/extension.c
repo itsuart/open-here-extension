@@ -251,12 +251,20 @@ static bool process_directory(WideStringContainer* strings, WideStringContainerI
     WIN32_FIND_DATAW findData;
     HANDLE searchHandle = FindFirstFileExW(searchPathBuffer, FindExInfoBasic, &findData, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
     if (INVALID_HANDLE_VALUE == searchHandle){
-        if (ERROR_FILE_NOT_FOUND == GetLastError()){
-            ODS(L"Directory doesn't exists");
-            return false;
-        } else {
-            ODS(L"FindFirstFileW failed");
-            return false;
+        const DWORD lastError = GetLastError();
+        switch (lastError){
+           case ERROR_ACCESS_DENIED:{
+               //it's ok
+               return true;
+           } break;
+           case ERROR_FILE_NOT_FOUND:{
+               ODS(L"Directory doesn't exists:"); ODS(searchPathBuffer);
+               return false;
+           } break;
+           default:{
+               ODS(L"FindFirstFileW failed");
+               return false;
+           }
         }
     }
 
@@ -344,11 +352,6 @@ static bool collect_content(IMyObj* pBase){
     //collect the content
     WorkQueueEntry currentWorkQueueEntry = {.parentIndex = -1, .indexInParent = 0};
     while (WorkQueue_dequeue(&pBase->workQueue, &currentWorkQueueEntry)){
-        u16* currentlyProcessedDirectoryPath;
-        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex,
-                                         &currentlyProcessedDirectoryPath);
-        //        ODS(L"Processing:"); ODS(currentlyProcessedDirectoryPath);
-
 
         FSEntriesContainer currentDirectoryContent;
         if (! FSEntriesContainer_init(&currentDirectoryContent, pBase->hHeap, currentWorkQueueEntry.fullPathIndex)){
@@ -360,6 +363,10 @@ static bool collect_content(IMyObj* pBase){
         currentDirectoryContent.indexInParent = currentWorkQueueEntry.indexInParent;
 
         if (! process_directory(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &currentDirectoryContent)){
+            u16* currentlyProcessedDirectoryPath;
+            WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex,
+                                         &currentlyProcessedDirectoryPath);
+
             ODS(L"Something went wrong processing following directory:"); ODS(currentlyProcessedDirectoryPath);
             return false;
         };
@@ -368,6 +375,11 @@ static bool collect_content(IMyObj* pBase){
             ODS(L"DirectoriesContainer_add failed");
             return false;
         }
+
+        //we have to get that path here because process_directory may add enough entries to cause reallocation in the WideStringContainer
+        u16* currentlyProcessedDirectoryPath;
+        WideStringContainer_getStringPtr(&pBase->strings, currentWorkQueueEntry.fullPathIndex, &currentlyProcessedDirectoryPath);
+
 
         //if there are subdirectories, add them to the queue
         for (uint i = 0; i < currentDirectoryContent.nDirectories; i += 1){

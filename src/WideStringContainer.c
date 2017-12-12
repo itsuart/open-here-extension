@@ -93,6 +93,7 @@ bool WideStringContainer_copy(WideStringContainer* pContainer, uint requestedStr
 
 bool WideStringContainer_getStringPtr(WideStringContainer* pContainer, uint requestedStringIndex, 
                                       u16** pResult){
+    *pResult = NULL;
     if (requestedStringIndex >= pContainer->nEntries){
         return false;
     }

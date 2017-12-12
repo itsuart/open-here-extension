@@ -82,7 +82,7 @@ static bool register_com_server(u16* server_path, uint server_path_length){
        display_error(errorCode);
        return false;
     }
-    
+
     HKEY inprocKey;
     errorCode = RegCreateKeyExW(
               clsidKey,
@@ -92,9 +92,9 @@ static bool register_com_server(u16* server_path, uint server_path_length){
               KEY_ALL_ACCESS,
               NULL,
               &inprocKey,
-              NULL              
+              NULL
     );
-    
+
     if (errorCode != ERROR_SUCCESS){
        display_error(errorCode);
        return false;
@@ -111,7 +111,7 @@ static bool register_com_server(u16* server_path, uint server_path_length){
        display_error(errorCode);
        return false;
     }
-    
+
 
     RegCloseKey(inprocKey);
     RegCloseKey(clsidKey);
@@ -261,13 +261,13 @@ void entry_point(){
                    inform(L"Extension was registered successfuly.");
                };
            } break;
-               
+
            case L'u':{
                if (uninstall_extension()){
                    inform(L"The extension was unregistered, but some applications might still use it. You should be able to remove files after reboot.");
                };
            } break;
-               
+
            default:{
                error(L"Invalid command line");
            }

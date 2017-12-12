@@ -21,7 +21,7 @@ bool DirectoriesContainer_add(DirectoriesContainer* pContainer, FSEntriesContain
 
         const uint newCapacity = pContainer->capacity * 2;
         if (newCapacity <= pContainer->capacity){
-            return false; 
+            return false;
         }
 
         FSEntriesContainer* newData = (FSEntriesContainer*)
@@ -29,6 +29,9 @@ bool DirectoriesContainer_add(DirectoriesContainer* pContainer, FSEntriesContain
         if (newData == NULL){
             return false;
         }
+
+        pContainer->data = newData;
+        pContainer->capacity = newCapacity;
     }
 
     pContainer->data[pContainer->nEntries] = directory;
@@ -43,8 +46,7 @@ void DirectoriesContainer_clear(DirectoriesContainer* pContainer){
         FSEntriesContainer* termedContainer = pContainer->data + i;
         FSEntriesContainer_term(termedContainer);
     }
-    
+
     SecureZeroMemory(pContainer->data, pContainer->capacity * sizeof(DirectoriesContainer));
     pContainer->nEntries = 0;
 }
-
