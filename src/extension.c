@@ -75,6 +75,13 @@ HRESULT STDMETHODCALLTYPE myIContextMenuImpl_GetCommandString(MyIContextMenuImpl
     return E_INVALIDARG;
 }
 
+static void shell_execute(const u16* fullItemPath, const u16* workingDirectory, int showCmd){
+    const bool shiftIsDown = (1 << 15) & (GetAsyncKeyState(VK_SHIFT));
+    const wchar_t* verb = shiftIsDown ? L"runAs" : L"open";
+
+    ShellExecuteW(NULL, verb, fullItemPath, NULL, workingDirectory, showCmd);
+}
+
 static void execute_item(const u16* fullItemPath, const u16* workingDirectory, int showCmd){
     //See if it is a link file, and if it is, see if it has working directory set.
     //If it is, then we copy link file to a temporary location and set it's working directory to one supplied to the function.
@@ -180,7 +187,7 @@ static void execute_item(const u16* fullItemPath, const u16* workingDirectory, i
         COM_RELEASE(pIShellLink);
 
         //execute the thing
-        ShellExecuteW(NULL, L"open", tempLinkPath, NULL, workingDirectory, showCmd);
+        shell_execute(tempLinkPath, workingDirectory, showCmd);
 
         //delete temp link
         DeleteFileW(tempLinkPath);
@@ -188,7 +195,7 @@ static void execute_item(const u16* fullItemPath, const u16* workingDirectory, i
     } while(0);
 
     //if we are here - it is not a link file or it is, but it's working directory is set by user, so execute it as is
-    ShellExecuteW(NULL, L"open", fullItemPath, NULL, workingDirectory, showCmd);
+    shell_execute(fullItemPath, workingDirectory, showCmd);
 }
 
 //I really hate person that causes me "undefined reference to `___chkstk_ms'" errors. And extra calls to clear the memory.

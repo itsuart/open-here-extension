@@ -7,6 +7,9 @@ COMMON_OBJ = $(OBJDIR)/WideStringContainer.o $(OBJDIR)/FSEntriesContainer.o $(OB
 
 all: installer extension
 
+make_dirs:
+	-@mkdir $(OBJDIR) $(BINDIR) 2>&1 > NUL
+
 clear_all_objs:
 	@rm -f $(OBJDIR)/*.o > NUL
 
@@ -41,7 +44,7 @@ installer.o:
 	@rm -f $(OBJDIR)/installer.o > NUL
 	$(CC) src/installer.c -o $(OBJDIR)/installer.o
 
-installer: installer.o
+installer: make_dirs installer.o
 	@rm -f $(BINDIR)/installer.exe
 	$(LINK) $(OBJDIR)/installer.o -e entry_point -o $(BINDIR)/installer.exe $(LIBS) -luuid -luser32 -lNtosKrnl -ladvapi32
 
@@ -61,6 +64,6 @@ HBitmapStorage.o:
 	@rm -f $(OBJDIR)/HBitmapStorage.o > NUL
 	$(CC) src/HBitmapStorage.c -o $(OBJDIR)/HBitmapStorage.o
 
-extension: extension.o  WorkQueue.o DirectoriesContainer.o HMenuStorage.o MenuCommandsMapping.o HBitmapStorage.o
+extension: make_dirs extension.o  WorkQueue.o DirectoriesContainer.o HMenuStorage.o MenuCommandsMapping.o HBitmapStorage.o
 	@rm -f $(BINDIR)/extension.dll
 	$(LINK) -shared $(COMMON_OBJ) $(OBJDIR)/extension.o $(OBJDIR)/HMenuStorage.o $(OBJDIR)/HBitmapStorage.o $(OBJDIR)/MenuCommandsMapping.o -e entry_point -o $(BINDIR)/extension.dll $(LIBS) -luuid -luser32 -lNtosKrnl -lGdi32
